@@ -1,0 +1,35 @@
+filters:
+  and:
+    - file.inFolder("Inventory")
+views:
+  - type: table
+    name: All objects
+    order:
+      - file.name
+      - category
+      - brand
+      - model
+      - location
+      - state
+      - warranty_until
+  - type: table
+    name: Under warranty
+    filters:
+      and:
+        - warranty_until > today()
+    order:
+      - file.name
+      - warranty_until
+      - shop
+    sort:
+      - property: warranty_until
+        direction: ASC
+  - type: table
+    name: Waiting for repair
+    filters:
+      and:
+        - file.hasTag("to-do")
+    order:
+      - file.name
+      - to_do
+      - location

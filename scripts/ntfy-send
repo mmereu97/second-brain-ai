@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+// Sends a push notification through ntfy, with quiet hours enforced in code.
+//
+//   ntfy-send "message" [--title "Title"] [--at "YYYY-MM-DD HH:MM" | --in "2m"]
+//             [--priority 1-5] [--tags a,b] [--night yes]
+//
+// Configuration (environment):
+//   NTFY_TOPIC   required; your private topic (treat it like a password)
+//   NTFY_SERVER  default https://ntfy.sh
+//   NTFY_TZ      time zone for --at and for quiet hours (default: the system's)
+//
+// ntfy.sh accepts scheduled messages up to 3 days ahead; use a calendar beyond that.
+
+// ── Quiet hours: change them here ─────────────────────────────────────────────
+const QUIET = [
+  { days: ["Sun"], from: 9, to: 12, reason: "Sunday morning" },
+  { days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], from: 22, to: 24, reason: "night", night: true },
+  { days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], from: 0, to: 7, reason: "night", night: true },
+];
+
+const TOPIC = process.env.NTFY_TOPIC;
+const SERVER = (process.env.NTFY_SERVER || "https://ntfy.sh").replace(/\/$/, "");
+const TZ = process.env.NTFY_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+const args = process.argv.slice(2);
+let message = null;
+const opts = {};
+for (let i = 0; i < args.length; i++) {
+  if (args[i].startsWith("--")) opts[args[i].slice(2)] = args[++i];
+  else if (message === null) message = args[i];
+}
+function fail(msg) { console.error(msg); process.exit(1); }
+if (!message) fail('Usage: ntfy-send "message" [--title T] [--at "YYYY-MM-DD HH:MM" | --in 2m] [--priority 1-5] [--tags a,b] [--night yes]');
+if (!TOPIC) fail("NTFY_TOPIC is not set.");
+if (opts.in && opts.at) fail("Use either --in or --at, not both.");
+
+// Local wall-clock time in TZ -> unix seconds.
+function localToUnix(s) {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/);
+  if (!m) fail('--at must look like "YYYY-MM-DD HH:MM"');
+  const [, y, mo, d, h, mi] = m.map(Number);
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  const p = parts(new Date(guess), { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const asLocal = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
+  return Math.round((guess - (asLocal - guess)) / 1000);
+}
+function parts(date, fields) {
+  return Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: TZ, hourCycle: "h23", ...fields })
+    .formatToParts(date).map(x => [x.type, x.value]));
+}
+function durationToSeconds(s) {
+  const re = /(\d+)\s*([smhd])/g; let total = 0, m, matched = "";
+  while ((m = re.exec(s))) { total += +m[1] * { s: 1, m: 60, h: 3600, d: 86400 }[m[2]]; matched += m[0]; }
+  if (!total || matched.replace(/\s/g, "") !== s.replace(/\s/g, "")) fail('--in must look like "2m", "1h30m", "45s"');
+  return total;
+}
+
+const headers = {};
+// HTTP headers are ASCII-only; non-ASCII titles are RFC 2047 encoded (ntfy decodes them).
+if (opts.title) headers.Title = /^[\x20-\x7e]*$/.test(opts.title)
+  ? opts.title : "=?UTF-8?B?" + Buffer.from(opts.title, "utf8").toString("base64") + "?=";
+if (opts.priority) headers.Priority = opts.priority;
+if (opts.tags) headers.Tags = opts.tags;
+
+const now = Math.floor(Date.now() / 1000);
+const when = opts.in ? now + durationToSeconds(opts.in) : opts.at ? localToUnix(opts.at) : now;
+if (opts.in || opts.at) {
+  if (when <= now) fail("That time is in the past.");
+  if (when - now > 3 * 24 * 3600) fail("ntfy.sh accepts at most 3 days ahead. Use the calendar.");
+  headers.At = String(when);
+}
+
+// Quiet hours apply to immediate messages too.
+const p = parts(new Date(when * 1000), { weekday: "short", hour: "2-digit" });
+const hour = +p.hour;
+for (const q of QUIET) {
+  if (q.days.includes(p.weekday) && hour >= q.from && hour < q.to) {
+    if (q.night && opts.night === "yes") continue;   // explicitly asked for (e.g. medication)
+    fail(`Refused: ${q.reason} is a quiet time. Pick another time${q.night ? ", or add --night yes if this was explicitly asked for" : ""}.`);
+  }
+}
+
+if (process.env.NTFY_DRY_RUN) { console.log("DRY RUN", new Date(when * 1000).toISOString(), headers, message); process.exit(0); }
+
+fetch(`${SERVER}/${TOPIC}`, { method: "POST", headers, body: message })
+  .then(async r => {
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) fail(`ntfy error: ${r.status} ${JSON.stringify(body)}`);
+    const t = body.time ? new Date(body.time * 1000).toLocaleString("en-GB", { timeZone: TZ }) : "now";
+    console.log(`OK (${r.status}) — delivery: ${t}`);
+  })
+  .catch(e => fail("Network error: " + e.message));

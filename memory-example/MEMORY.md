@@ -1,0 +1,3 @@
+- **New conversation:** read `00 Agent/Handoff.md` in the vault first
+- [Quiet hours](quiet-hours.md) — never Sunday 09–12; nights only when explicitly asked
+- [Reading large PDFs](pdf-reading.md) — extract text with page markers; answer with the page number
